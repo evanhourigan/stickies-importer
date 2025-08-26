@@ -149,8 +149,10 @@ class StickyNote:
 
 
 def normalize_ws(s: str) -> str:
-    s = s.replace("\u00A0", " ")
-    s = re.sub(r"\s+", " ", s)
+    # Handle various Unicode whitespace and problem characters
+    s = s.replace("\u00A0", " ")  # Non-breaking space
+    s = re.sub(r"[\u2000-\u200F\u2028-\u202F\u205F-\u206F]", " ", s)  # Various Unicode spaces
+    s = re.sub(r"\s+", " ", s)  # Collapse multiple whitespace
     return s.strip()
 
 
@@ -170,6 +172,30 @@ def truncate_title(s: str) -> str:
     return (s[: MAX_TITLE_LEN - 1] + "…") if len(s) > MAX_TITLE_LEN else s
 
 
+def clean_unicode_text(text: str) -> str:
+    """Clean text of problematic Unicode characters that can cause encoding issues."""
+    import unicodedata
+
+    # Remove or replace problematic characters
+    text = text.encode("utf-8", errors="ignore").decode("utf-8")  # Remove invalid UTF-8
+    text = unicodedata.normalize("NFKC", text)  # Normalize Unicode
+
+    # Remove surrogate pairs and other problematic characters
+    cleaned_chars = []
+    for char in text:
+        try:
+            # Test if character can be encoded
+            char.encode("utf-8")
+            # Skip surrogate pairs
+            if 0xD800 <= ord(char) <= 0xDFFF:
+                continue
+            cleaned_chars.append(char)
+        except UnicodeEncodeError:
+            continue
+
+    return "".join(cleaned_chars)
+
+
 def rtf_to_html_and_text(rtf_bytes: bytes) -> Tuple[Optional[str], str]:
     """Return (html or None, plain_text). Prefer Pandoc HTML; fallback to plain."""
     try:
@@ -181,12 +207,15 @@ def rtf_to_html_and_text(rtf_bytes: bytes) -> Tuple[Optional[str], str]:
     if HAS_PANDOC:
         try:
             html = pypandoc.convert_text(s, "html", format="rtf")
+            if html:
+                html = clean_unicode_text(html)
         except Exception:
             html = None
 
     if html:
         plain = BeautifulSoup(html, "html.parser").get_text("\n")
         plain = "\n".join([ln.rstrip() for ln in plain.splitlines()])
+        plain = clean_unicode_text(plain)
         return html, plain
 
     # Fallback: plain text via striprtf or crude regex strip
@@ -202,6 +231,7 @@ def rtf_to_html_and_text(rtf_bytes: bytes) -> Tuple[Optional[str], str]:
         text = _re.sub(r"\\[a-zA-Z]+-?\d*\s?", "", text)
         text = _re.sub(r"[{}]", "", text)
     text = "\n".join([ln.rstrip() for ln in text.splitlines()])
+    text = clean_unicode_text(text)
     return None, text
 
 
@@ -269,6 +299,9 @@ def read_stickies_db(db_path: Path, tz_str: str) -> list[StickyNote]:
         created = _get_dt(cand, r"create|birth", tz) or dt.datetime.now(tz)
         modified = _get_dt(cand, r"modif|update", tz) or created
         title = truncate_title(first_nonempty_line(plain))
+        title = clean_unicode_text(title)
+        plain = clean_unicode_text(plain) if plain else ""
+        html = clean_unicode_text(html) if html else None
         notes.append(StickyNote(title, created, modified, html, plain, f"db#{idx}"))
     return notes
 
@@ -300,12 +333,15 @@ def read_rtf_dir(folder: Path, tz_str: str) -> list[StickyNote]:
         created = dt.datetime.fromtimestamp(getattr(st, "st_birthtime", st.st_mtime), tz=tz)
         modified = dt.datetime.fromtimestamp(st.st_mtime, tz=tz)
         title = truncate_title(first_nonempty_line(plain) or p.stem)
+        title = clean_unicode_text(title)
+        plain = clean_unicode_text(plain) if plain else ""
+        html = clean_unicode_text(html) if html else None
         notes.append(StickyNote(title, created, modified, html, plain, str(p)))
     return notes
 
 
 def sha256_hex(s: str) -> str:
-    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+    return hashlib.sha256(s.encode("utf-8", errors="ignore")).hexdigest()
 
 
 MAX_TEXT_CHUNK = 1800
@@ -323,6 +359,206 @@ def chunk_text(s: str, n: int = MAX_TEXT_CHUNK):
     if buf:
         chunks.append("".join(buf))
     return [c for c in chunks if c]
+
+
+# --- Notion helper functions needed by main() ---
+
+
+def _text_obj(content: str, **ann):
+    return {
+        "type": "text",
+        "text": {"content": content, "link": None},
+        "annotations": {
+            "bold": bool(ann.get("bold")),
+            "italic": bool(ann.get("italic")),
+            "strikethrough": False,
+            "underline": bool(ann.get("underline")),
+            "code": bool(ann.get("code")),
+            "color": "default",
+        },
+        "plain_text": content,
+        "href": None,
+    }
+
+
+def _inline_from_node(node):
+    out = []
+
+    def push(txt):
+        for c in chunk_text(txt):
+            out.append(_text_obj(c))
+
+    if isinstance(node, str):
+        push(str(node))
+        return out
+    if hasattr(node, "name"):
+        tag = node.name.lower()
+        ann = {
+            "bold": tag in ("strong", "b"),
+            "italic": tag in ("em", "i"),
+            "underline": tag == "u",
+            "code": tag == "code",
+        }
+        for child in node.children:
+            out.extend(_inline_from_node(child))
+        if any(ann.values()):
+            for i in out:
+                for k, v in ann.items():
+                    if v:
+                        i["annotations"][k] = True
+    return out
+
+
+def html_to_blocks(html: str):
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html, "html.parser")
+    body = soup.body or soup
+    blocks = []
+    for node in body.children:
+        if isinstance(node, str):
+            txt = normalize_ws(str(node))
+            if txt:
+                blocks.append(
+                    {
+                        "object": "block",
+                        "type": "paragraph",
+                        "paragraph": {"rich_text": [_text_obj(txt)]},
+                    }
+                )
+            continue
+        if not hasattr(node, "name"):
+            continue
+        tag = node.name.lower()
+        if tag in ("h1", "h2", "h3"):
+            level = {"h1": "heading_1", "h2": "heading_2", "h3": "heading_3"}[tag]
+            blocks.append(
+                {"object": "block", "type": level, level: {"rich_text": _inline_from_node(node)}}
+            )
+        elif tag in ("ul", "ol"):
+            ordered = tag == "ol"
+            for li in node.find_all("li", recursive=False):
+                t = "numbered_list_item" if ordered else "bulleted_list_item"
+                blocks.append(
+                    {"object": "block", "type": t, t: {"rich_text": _inline_from_node(li)}}
+                )
+        elif tag in ("pre",):
+            code_text = node.get_text("\n")
+            blocks.append(
+                {
+                    "object": "block",
+                    "type": "code",
+                    "code": {"language": "plain text", "rich_text": [_text_obj(code_text)]},
+                }
+            )
+        elif tag in ("blockquote",):
+            blocks.append(
+                {
+                    "object": "block",
+                    "type": "quote",
+                    "quote": {"rich_text": _inline_from_node(node)},
+                }
+            )
+        else:
+            blocks.append(
+                {
+                    "object": "block",
+                    "type": "paragraph",
+                    "paragraph": {"rich_text": _inline_from_node(node) or [_text_obj("")]},
+                }
+            )
+    if not blocks:
+        blocks.append(
+            {"object": "block", "type": "paragraph", "paragraph": {"rich_text": [_text_obj("")]}}
+        )
+    return blocks
+
+
+def fetch_existing_hashes(notion: Client, database_id: str) -> dict[str, str]:
+    hashes: dict[str, str] = {}
+    cursor = None
+    while True:
+        resp = notion.databases.query(
+            **(
+                {"database_id": database_id, "start_cursor": cursor}
+                if cursor
+                else {"database_id": database_id}
+            )
+        )
+        for page in resp.get("results", []):
+            props = page.get("properties", {})
+            ih = props.get("Import Hash")
+            if ih and ih.get("type") == "rich_text":
+                rts = ih.get("rich_text") or []
+                if rts:
+                    h = rts[0].get("plain_text")
+                    if h:
+                        hashes[h] = page["id"]
+        cursor = resp.get("next_cursor")
+        if not resp.get("has_more"):
+            break
+    return hashes
+
+
+def create_or_update_page(
+    notion: Client,
+    database_id: str,
+    note,
+    page_id: str | None,
+    content_hash: str,
+    verbose: bool = False,
+):
+    props = {
+        "Name": {"title": [{"type": "text", "text": {"content": note.title}}]},
+        "Created": {"date": {"start": note.created.isoformat()}},
+        "Modified": {"date": {"start": note.modified.isoformat()}},
+        "Import Hash": {"rich_text": [{"type": "text", "text": {"content": content_hash}}]},
+    }
+    if note.html:
+        children = html_to_blocks(note.html)
+    else:
+        # Split long plain text into multiple paragraphs
+        plain_text = note.plain or ""
+        if len(plain_text) <= 2000:
+            children = [
+                {
+                    "object": "block",
+                    "type": "paragraph",
+                    "paragraph": {"rich_text": [{"type": "text", "text": {"content": plain_text}}]},
+                }
+            ]
+        else:
+            # Split into chunks of 2000 characters
+            chunks = chunk_text(plain_text, 2000)
+            children = []
+            for chunk in chunks:
+                children.append(
+                    {
+                        "object": "block",
+                        "type": "paragraph",
+                        "paragraph": {"rich_text": [{"type": "text", "text": {"content": chunk}}]},
+                    }
+                )
+    try:
+        if page_id:
+            if verbose:
+                print(f"Updating page {page_id}: {note.title}")
+            notion.pages.update(page_id=page_id, properties=props)
+            # Append a divider and new content (simple, safe approach)
+            notion.blocks.children.append(
+                block_id=page_id, children=[{"object": "block", "type": "divider", "divider": {}}]
+            )
+            BATCH = 80
+            for i in range(0, len(children), BATCH):
+                notion.blocks.children.append(block_id=page_id, children=children[i : i + BATCH])
+        else:
+            if verbose:
+                print(f"Creating page: {note.title}")
+            notion.pages.create(
+                parent={"database_id": database_id}, properties=props, children=children
+            )
+    except Exception as e:
+        print(f"ERROR: Notion API failed: {e}")
 
 
 def main():
@@ -466,189 +702,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-# --- Additional utility functions needed by main() ---
-
-
-# --- HTML → Notion blocks ---
-def _text_obj(content: str, **ann):
-    return {
-        "type": "text",
-        "text": {"content": content, "link": None},
-        "annotations": {
-            "bold": bool(ann.get("bold")),
-            "italic": bool(ann.get("italic")),
-            "strikethrough": False,
-            "underline": bool(ann.get("underline")),
-            "code": bool(ann.get("code")),
-            "color": "default",
-        },
-        "plain_text": content,
-        "href": None,
-    }
-
-
-def _inline_from_node(node: Tag | NavigableString):
-    out = []
-
-    def push(txt):
-        for c in chunk_text(txt):
-            out.append(_text_obj(c))
-
-    if isinstance(node, NavigableString):
-        push(str(node))
-        return out
-    tag = node.name.lower()
-    ann = {
-        "bold": tag in ("strong", "b"),
-        "italic": tag in ("em", "i"),
-        "underline": tag == "u",
-        "code": tag == "code",
-    }
-    for child in node.children:
-        out.extend(_inline_from_node(child))
-    if any(ann.values()):
-        for i in out:
-            for k, v in ann.items():
-                if v:
-                    i["annotations"][k] = True
-    return out
-
-
-def html_to_blocks(html: str):
-    soup = BeautifulSoup(html, "html.parser")
-    body = soup.body or soup
-    blocks = []
-    for node in body.children:
-        if isinstance(node, NavigableString):
-            txt = normalize_ws(str(node))
-            if txt:
-                blocks.append(
-                    {
-                        "object": "block",
-                        "type": "paragraph",
-                        "paragraph": {"rich_text": [_text_obj(txt)]},
-                    }
-                )
-            continue
-        if not isinstance(node, Tag):
-            continue
-        tag = node.name.lower()
-        if tag in ("h1", "h2", "h3"):
-            level = {"h1": "heading_1", "h2": "heading_2", "h3": "heading_3"}[tag]
-            blocks.append(
-                {"object": "block", "type": level, level: {"rich_text": _inline_from_node(node)}}
-            )
-        elif tag in ("ul", "ol"):
-            ordered = tag == "ol"
-            for li in node.find_all("li", recursive=False):
-                t = "numbered_list_item" if ordered else "bulleted_list_item"
-                blocks.append(
-                    {"object": "block", "type": t, t: {"rich_text": _inline_from_node(li)}}
-                )
-        elif tag in ("pre",):
-            code_text = node.get_text("\n")
-            blocks.append(
-                {
-                    "object": "block",
-                    "type": "code",
-                    "code": {"language": "plain text", "rich_text": [_text_obj(code_text)]},
-                }
-            )
-        elif tag in ("blockquote",):
-            blocks.append(
-                {
-                    "object": "block",
-                    "type": "quote",
-                    "quote": {"rich_text": _inline_from_node(node)},
-                }
-            )
-        else:
-            blocks.append(
-                {
-                    "object": "block",
-                    "type": "paragraph",
-                    "paragraph": {"rich_text": _inline_from_node(node) or [_text_obj("")]},
-                }
-            )
-    if not blocks:
-        blocks.append(
-            {"object": "block", "type": "paragraph", "paragraph": {"rich_text": [_text_obj("")]}}
-        )
-    return blocks
-
-
-# --- Notion upsert ---
-def fetch_existing_hashes(notion: Client, database_id: str) -> dict[str, str]:
-    hashes: dict[str, str] = {}
-    cursor = None
-    while True:
-        resp = notion.databases.query(
-            **(
-                {"database_id": database_id, "start_cursor": cursor}
-                if cursor
-                else {"database_id": database_id}
-            )
-        )
-        for page in resp.get("results", []):
-            props = page.get("properties", {})
-            ih = props.get("Import Hash")
-            if ih and ih.get("type") == "rich_text":
-                rts = ih.get("rich_text") or []
-                if rts:
-                    h = rts[0].get("plain_text")
-                    if h:
-                        hashes[h] = page["id"]
-        cursor = resp.get("next_cursor")
-        if not resp.get("has_more"):
-            break
-    return hashes
-
-
-def create_or_update_page(
-    notion: Client,
-    database_id: str,
-    note,
-    page_id: str | None,
-    content_hash: str,
-    verbose: bool = False,
-):
-    props = {
-        "Name": {"title": [{"type": "text", "text": {"content": note.title}}]},
-        "Created": {"date": {"start": note.created.isoformat()}},
-        "Modified": {"date": {"start": note.modified.isoformat()}},
-        "Import Hash": {"rich_text": [{"type": "text", "text": {"content": content_hash}}]},
-    }
-    children = (
-        html_to_blocks(note.html)
-        if note.html
-        else [
-            {
-                "object": "block",
-                "type": "paragraph",
-                "paragraph": {
-                    "rich_text": [{"type": "text", "text": {"content": note.plain or ""}}]
-                },
-            }
-        ]
-    )
-    try:
-        if page_id:
-            if verbose:
-                print(f"Updating page {page_id}: {note.title}")
-            notion.pages.update(page_id=page_id, properties=props)
-            # Append a divider and new content (simple, safe approach)
-            notion.blocks.children.append(
-                block_id=page_id, children=[{"object": "block", "type": "divider", "divider": {}}]
-            )
-            BATCH = 80
-            for i in range(0, len(children), BATCH):
-                notion.blocks.children.append(block_id=page_id, children=children[i : i + BATCH])
-        else:
-            if verbose:
-                print(f"Creating page: {note.title}")
-            notion.pages.create(
-                parent={"database_id": database_id}, properties=props, children=children
-            )
-    except APIResponseError as e:
-        print(f"ERROR: Notion API failed: {e}")
