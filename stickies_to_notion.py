@@ -79,7 +79,14 @@ def main():
         db_path = Path(os.path.expanduser(args.db_path))
         if not db_path.exists():
             raise SystemExit(f"ERROR: Stickies database not found at {db_path}")
-        notes = read_stickies_db(db_path, args.tz)
+        try:
+            notes = read_stickies_db(db_path, args.tz)
+        except PermissionError as e:
+            raise SystemExit(
+                f"ERROR: Could not open Stickies database at {db_path} — it may be locked.\n"
+                f"Tip: Quit Stickies.app, or copy the database somewhere else (e.g. /tmp) and run with --db-path.\n\n{e}"
+            )
+
     else:
         notes = []
 
