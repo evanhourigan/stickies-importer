@@ -89,10 +89,26 @@ parser.add_argument(
     default="db",
     help="Source mode: currently only 'db' is supported (reads StickiesDatabase plist).",
 )
+
+
+def default_db_path() -> str:
+    """Return the most likely StickiesDatabase path."""
+    candidates = [
+        "~/Library/StickiesDatabase",  # modern macOS
+        "~/Library/Containers/com.apple.Stickies/Data/Library/StickiesDatabase",  # older sandboxed
+    ]
+    for c in candidates:
+        if Path(os.path.expanduser(c)).exists():
+            return c
+    # Fall back to the modern location even if it doesn't exist yet
+    return candidates[0]
+
+
 parser.add_argument(
     "--db-path",
-    default="~/Library/Containers/com.apple.Stickies/Data/Library/StickiesDatabase",
-    help="Path to StickiesDatabase file (default: standard macOS location).",
+    default=default_db_path(),
+    help="Path to StickiesDatabase file. Defaults to ~/Library/StickiesDatabase "
+    "or the Containers path if present.",
 )
 parser.add_argument(
     "--limit", type=int, default=None, help="Import at most N notes (useful for testing)."
