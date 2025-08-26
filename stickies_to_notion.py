@@ -2,9 +2,27 @@ import argparse
 import hashlib
 import os
 import re
+from typing import Optional, Tuple
 
 from dotenv import load_dotenv
 from notion_client import Client
+
+# Optional converters
+try:
+    import pypandoc  # type: ignore
+
+    HAS_PANDOC = True
+except Exception:
+    HAS_PANDOC = False
+
+try:
+    from striprtf.striprtf import rtf_to_text  # type: ignore
+
+    HAS_STRIPRTF = True
+except Exception:
+    HAS_STRIPRTF = False
+
+from bs4 import BeautifulSoup
 
 load_dotenv()
 
@@ -93,3 +111,38 @@ def chunk_text(s: str, n: int = MAX_TEXT_CHUNK):
 
 def sha256_hex(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+
+def rtf_to_html_and_text(rtf_bytes: bytes) -> Tuple[Optional[str], str]:
+    """Return (html or None, plain_text). Prefer Pandoc HTML; fallback to plain."""
+    try:
+        s = rtf_bytes.decode("utf-8", errors="ignore")
+    except Exception:
+        s = rtf_bytes.decode("latin-1", errors="ignore")
+
+    html = None
+    if HAS_PANDOC:
+        try:
+            html = pypandoc.convert_text(s, "html", format="rtf")
+        except Exception:
+            html = None
+
+    if html:
+        plain = BeautifulSoup(html, "html.parser").get_text("\n")
+        plain = "\n".join([ln.rstrip() for ln in plain.splitlines()])
+        return html, plain
+
+    # Fallback: plain text via striprtf or crude regex strip
+    if HAS_STRIPRTF:
+        try:
+            text = rtf_to_text(s)
+        except Exception:
+            text = ""
+    else:
+        import re as _re
+
+        text = _re.sub(r"\\'[0-9a-fA-F]{2}", " ", s)
+        text = _re.sub(r"\\[a-zA-Z]+-?\d*\s?", "", text)
+        text = _re.sub(r"[{}]", "", text)
+    text = "\n".join([ln.rstrip() for ln in text.splitlines()])
+    return None, text
