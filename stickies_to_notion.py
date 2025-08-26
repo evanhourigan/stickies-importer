@@ -22,7 +22,17 @@ try:
 except Exception:
     HAS_STRIPRTF = False
 
+import datetime as dt
+import plistlib
+from dataclasses import dataclass
+from pathlib import Path
+
 from bs4 import BeautifulSoup
+
+try:
+    from zoneinfo import ZoneInfo  # py39+
+except Exception:
+    ZoneInfo = None
 
 load_dotenv()
 
@@ -146,3 +156,82 @@ def rtf_to_html_and_text(rtf_bytes: bytes) -> Tuple[Optional[str], str]:
         text = _re.sub(r"[{}]", "", text)
     text = "\n".join([ln.rstrip() for ln in text.splitlines()])
     return None, text
+
+
+# --- Stickies models & reader ---
+@dataclass
+class StickyNote:
+    title: str
+    created: dt.datetime
+    modified: dt.datetime
+    html: Optional[str]
+    plain: str
+    source_id: str
+
+
+def _extract_note_candidates(obj) -> list[dict]:
+    import re as _re
+
+    found = []
+
+    def visit(x):
+        if isinstance(x, dict):
+            rtf_keys = [k for k in x.keys() if _re.search(r"rtf|nsrtf|rtfd|textdata", k, _re.I)]
+            if rtf_keys:
+                found.append(x)
+            for v in x.values():
+                visit(v)
+        elif isinstance(x, list):
+            for v in x:
+                visit(v)
+
+    visit(obj)
+    return found
+
+
+def _get_bytes_from_candidate(d: dict) -> Optional[bytes]:
+    for k in ["NSRTFData", "NSRTF", "RTF", "RTFD", "TextData", "Data", "NoteData"]:
+        if k in d:
+            v = d[k]
+            if isinstance(v, (bytes, bytearray)):
+                return bytes(v)
+            if isinstance(v, dict):
+                for kk in ("NS.data", "data", "bytes"):
+                    if kk in v and isinstance(v[kk], (bytes, bytearray)):
+                        return bytes(v[kk])
+    return None
+
+
+def _get_dt(d: dict, hint: str, tz: Optional["ZoneInfo"]) -> Optional[dt.datetime]:
+    import re as _re
+
+    for k, v in d.items():
+        if _re.search(hint, k, _re.I):
+            if isinstance(v, dt.datetime):
+                return v if v.tzinfo or not tz else v.replace(tzinfo=tz)
+            if isinstance(v, (int, float)):
+                return dt.datetime.fromtimestamp(float(v), tz=tz)
+            if isinstance(v, str):
+                try:
+                    t = dt.datetime.fromisoformat(v)
+                    return t if t.tzinfo or not tz else t.replace(tzinfo=tz)
+                except Exception:
+                    pass
+    return None
+
+
+def read_stickies_db(db_path: Path, tz_str: str) -> list[StickyNote]:
+    tz = ZoneInfo(tz_str) if ZoneInfo else None
+    with open(db_path, "rb") as f:
+        data = plistlib.load(f)
+    notes: list[StickyNote] = []
+    for idx, cand in enumerate(_extract_note_candidates(data)):
+        rtf = _get_bytes_from_candidate(cand)
+        if not rtf:
+            continue
+        html, plain = rtf_to_html_and_text(rtf)
+        created = _get_dt(cand, r"create|birth", tz) or dt.datetime.now(tz)
+        modified = _get_dt(cand, r"modif|update", tz) or created
+        title = truncate_title(first_nonempty_line(plain))
+        notes.append(StickyNote(title, created, modified, html, plain, f"db#{idx}"))
+    return notes
