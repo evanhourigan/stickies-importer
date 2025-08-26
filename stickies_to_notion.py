@@ -38,6 +38,9 @@ except Exception:
 
 load_dotenv()
 
+# Ensure pandoc is in PATH
+os.environ["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + os.environ.get("PATH", "")
+
 token = os.environ.get("NOTION_TOKEN")
 database_id = os.environ.get("NOTION_DB_ID")
 
@@ -146,6 +149,9 @@ class StickyNote:
     html: Optional[str]
     plain: str
     source_id: str
+    color: Optional[str] = (
+        None  # Color name like "Yellow", "Blue", "Green", "Pink", "Purple", "Gray"
+    )
 
 
 def normalize_ws(s: str) -> str:
@@ -302,8 +308,92 @@ def read_stickies_db(db_path: Path, tz_str: str) -> list[StickyNote]:
         title = clean_unicode_text(title)
         plain = clean_unicode_text(plain) if plain else ""
         html = clean_unicode_text(html) if html else None
-        notes.append(StickyNote(title, created, modified, html, plain, f"db#{idx}"))
+        notes.append(StickyNote(title, created, modified, html, plain, f"db#{idx}", None))
     return notes
+
+
+def rgb_to_color_name(red: float, green: float, blue: float) -> str:
+    """Convert RGB values (0.0-1.0) to Stickies color name."""
+    # Convert to 0-255 range for easier comparison
+    r = int(red * 255)
+    g = int(green * 255)
+    b = int(blue * 255)
+
+    # Gray check first (all components similar)
+    if abs(r - g) < 30 and abs(g - b) < 30 and abs(r - b) < 30:
+        return "Gray"
+
+    # Yellow (high red and green, lower blue)
+    if r > 240 and g > 240 and b < 200:
+        return "Yellow"
+
+    # Green (high green)
+    if g > max(r, b) + 30:
+        return "Green"
+
+    # Blue (high blue)
+    if b > max(r, g) + 30:
+        return "Blue"
+
+    # Pink (high red, moderate others)
+    if r > max(g, b) + 20 and g > 150 and b > 150:
+        return "Pink"
+
+    # Purple (high blue and red, lower green)
+    if r > 150 and b > 150 and g < min(r, b) - 20:
+        return "Purple"
+
+    # Default fallback based on dominant color
+    if r >= g and r >= b:
+        return "Pink" if b > g else "Yellow"
+    elif g >= r and g >= b:
+        return "Green"
+    else:
+        return "Blue"
+
+
+def load_sticky_colors(stickies_dir: Path) -> dict[str, str]:
+    """Load sticky note colors from .SavedStickiesState file."""
+    state_file = stickies_dir / ".SavedStickiesState"
+    color_map = {}
+
+    if not state_file.exists():
+        return color_map
+
+    try:
+        with open(state_file, "rb") as f:
+            state_data = plistlib.load(f)
+
+        if isinstance(state_data, list):
+            for sticky_data in state_data:
+                if isinstance(sticky_data, dict):
+                    # Try to find the sticky ID and color
+                    sticky_id = None
+                    color = None
+
+                    # Look for ID in various possible keys
+                    for key in ["UUID", "ID", "Identifier"]:
+                        if key in sticky_data:
+                            sticky_id = sticky_data[key]
+                            break
+
+                    # Look for color information
+                    if "StickyColor" in sticky_data and isinstance(
+                        sticky_data["StickyColor"], dict
+                    ):
+                        color_dict = sticky_data["StickyColor"]
+                        if all(k in color_dict for k in ["Red", "Green", "Blue"]):
+                            color = rgb_to_color_name(
+                                color_dict["Red"], color_dict["Green"], color_dict["Blue"]
+                            )
+
+                    if sticky_id and color:
+                        color_map[sticky_id] = color
+
+    except Exception as e:
+        print(f"Warning: Could not load sticky colors: {e}")
+
+    return color_map
 
 
 def read_rtf_dir(folder: Path, tz_str: str) -> list[StickyNote]:
@@ -311,6 +401,10 @@ def read_rtf_dir(folder: Path, tz_str: str) -> list[StickyNote]:
     notes: list[StickyNote] = []
     if not folder.exists():
         return notes
+
+    # Load color information
+    color_map = load_sticky_colors(folder)
+
     for p in sorted(list(folder.glob("*.rtf")) + list(folder.glob("*.rtfd"))):
         try:
             if p.suffix.lower() == ".rtf":
@@ -336,7 +430,12 @@ def read_rtf_dir(folder: Path, tz_str: str) -> list[StickyNote]:
         title = clean_unicode_text(title)
         plain = clean_unicode_text(plain) if plain else ""
         html = clean_unicode_text(html) if html else None
-        notes.append(StickyNote(title, created, modified, html, plain, str(p)))
+
+        # Extract UUID from filename for color lookup
+        sticky_uuid = p.stem  # e.g., "0832F37A-A9C7-46DD-8E34-C549AEE4F395"
+        color = color_map.get(sticky_uuid)
+
+        notes.append(StickyNote(title, created, modified, html, plain, str(p), color))
     return notes
 
 
@@ -385,7 +484,9 @@ def _inline_from_node(node):
     out = []
 
     def push(txt):
-        for c in chunk_text(txt):
+        # Limit text chunks to avoid rich_text array length limits
+        chunks = chunk_text(txt, 1500)  # Smaller chunks for rich text
+        for c in chunks[:50]:  # Limit to 50 chunks max
             out.append(_text_obj(c))
 
     if isinstance(node, str):
@@ -400,13 +501,17 @@ def _inline_from_node(node):
             "code": tag == "code",
         }
         for child in node.children:
-            out.extend(_inline_from_node(child))
+            child_out = _inline_from_node(child)
+            out.extend(child_out)
+            # Limit total rich text elements
+            if len(out) >= 80:
+                break
         if any(ann.values()):
             for i in out:
                 for k, v in ann.items():
                     if v:
                         i["annotations"][k] = True
-    return out
+    return out[:80]  # Hard limit to stay under 100
 
 
 def html_to_blocks(html: str):
@@ -514,6 +619,10 @@ def create_or_update_page(
         "Modified": {"date": {"start": note.modified.isoformat()}},
         "Import Hash": {"rich_text": [{"type": "text", "text": {"content": content_hash}}]},
     }
+
+    # Add color if available
+    if note.color:
+        props["Color"] = {"rich_text": [{"type": "text", "text": {"content": note.color}}]}
     if note.html:
         children = html_to_blocks(note.html)
     else:
@@ -528,10 +637,10 @@ def create_or_update_page(
                 }
             ]
         else:
-            # Split into chunks of 2000 characters
-            chunks = chunk_text(plain_text, 2000)
+            # Split into chunks of 1800 characters (leaving room for rich text overhead)
+            chunks = chunk_text(plain_text, 1800)
             children = []
-            for chunk in chunks:
+            for chunk in chunks[:20]:  # Limit to 20 blocks max
                 children.append(
                     {
                         "object": "block",
@@ -688,7 +797,10 @@ def main():
     if args.dry_run:
         print(f"[DRY RUN] Would import {len(items)} notes. Showing first 5:")
         for n, h in items[:5]:
-            print(f"— {n.title} | created {n.created} | modified {n.modified} | hash {h[:10]}…")
+            color_info = f" | color {n.color}" if n.color else ""
+            print(
+                f"— {n.title} | created {n.created} | modified {n.modified}{color_info} | hash {h[:10]}…"
+            )
         return
 
     existing = fetch_existing_hashes(notion, database_id)
