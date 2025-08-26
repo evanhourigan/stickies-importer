@@ -1,5 +1,7 @@
 import argparse
+import hashlib
 import os
+import re
 
 from dotenv import load_dotenv
 from notion_client import Client
@@ -50,3 +52,44 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# --- Utility helpers ---
+MAX_TITLE_LEN = 200
+MAX_TEXT_CHUNK = 1800
+
+
+def normalize_ws(s: str) -> str:
+    s = s.replace("\u00A0", " ")
+    s = re.sub(r"\s+", " ", s)
+    return s.strip()
+
+
+def first_nonempty_line(text: str) -> str:
+    for line in text.splitlines():
+        ln = normalize_ws(line)
+        if ln:
+            return ln
+    return "(untitled)"
+
+
+def truncate_title(s: str) -> str:
+    s = s.strip()
+    return (s[: MAX_TITLE_LEN - 1] + "…") if len(s) > MAX_TITLE_LEN else s
+
+
+def chunk_text(s: str, n: int = MAX_TEXT_CHUNK):
+    chunks, buf, count = [], [], 0
+    for part in re.split(r"(\s+)", s):
+        if count + len(part) > n:
+            chunks.append("".join(buf))
+            buf, count = [part], len(part)
+        else:
+            buf.append(part)
+            count += len(part)
+    if buf:
+        chunks.append("".join(buf))
+    return [c for c in chunks if c]
+
+
+def sha256_hex(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
