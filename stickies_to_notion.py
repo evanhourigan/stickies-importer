@@ -6,6 +6,7 @@ from typing import Optional, Tuple
 
 from dotenv import load_dotenv
 from notion_client import Client
+from notion_client.errors import APIResponseError
 
 # Optional converters
 try:
@@ -344,3 +345,79 @@ def html_to_blocks(html: str):
             {"object": "block", "type": "paragraph", "paragraph": {"rich_text": [_text_obj("")]}}
         )
     return blocks
+
+
+# --- Notion upsert ---
+def fetch_existing_hashes(notion: Client, database_id: str) -> dict[str, str]:
+    hashes: dict[str, str] = {}
+    cursor = None
+    while True:
+        resp = notion.databases.query(
+            **(
+                {"database_id": database_id, "start_cursor": cursor}
+                if cursor
+                else {"database_id": database_id}
+            )
+        )
+        for page in resp.get("results", []):
+            props = page.get("properties", {})
+            ih = props.get("Import Hash")
+            if ih and ih.get("type") == "rich_text":
+                rts = ih.get("rich_text") or []
+                if rts:
+                    h = rts[0].get("plain_text")
+                    if h:
+                        hashes[h] = page["id"]
+        cursor = resp.get("next_cursor")
+        if not resp.get("has_more"):
+            break
+    return hashes
+
+
+def create_or_update_page(
+    notion: Client,
+    database_id: str,
+    note,
+    page_id: str | None,
+    content_hash: str,
+    verbose: bool = False,
+):
+    props = {
+        "Name": {"title": [{"type": "text", "text": {"content": note.title}}]},
+        "Created": {"date": {"start": note.created.isoformat()}},
+        "Modified": {"date": {"start": note.modified.isoformat()}},
+        "Import Hash": {"rich_text": [{"type": "text", "text": {"content": content_hash}}]},
+    }
+    children = (
+        html_to_blocks(note.html)
+        if note.html
+        else [
+            {
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {
+                    "rich_text": [{"type": "text", "text": {"content": note.plain or ""}}]
+                },
+            }
+        ]
+    )
+    try:
+        if page_id:
+            if verbose:
+                print(f"Updating page {page_id}: {note.title}")
+            notion.pages.update(page_id=page_id, properties=props)
+            # Append a divider and new content (simple, safe approach)
+            notion.blocks.children.append(
+                block_id=page_id, children=[{"object": "block", "type": "divider", "divider": {}}]
+            )
+            BATCH = 80
+            for i in range(0, len(children), BATCH):
+                notion.blocks.children.append(block_id=page_id, children=children[i : i + BATCH])
+        else:
+            if verbose:
+                print(f"Creating page: {note.title}")
+            notion.pages.create(
+                parent={"database_id": database_id}, properties=props, children=children
+            )
+    except APIResponseError as e:
+        print(f"ERROR: Notion API failed: {e}")
