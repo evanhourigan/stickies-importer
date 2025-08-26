@@ -49,15 +49,41 @@ if not token:
 if not database_id:
     raise SystemExit("ERROR: NOTION_DB_ID is not set (see .env.example).")
 
-parser = argparse.ArgumentParser(description="Stickies → Notion importer")
-parser.add_argument("--tz", default=default_tz, help="IANA timezone (e.g. America/Los_Angeles).")
-parser.add_argument("--verbose", action="store_true")
-parser.add_argument("--mode", choices=["db"], default="db")
-parser.add_argument(
-    "--db-path", default="~/Library/Containers/com.apple.Stickies/Data/Library/StickiesDatabase"
+parser = argparse.ArgumentParser(
+    prog="stickies_to_notion.py",
+    description="Import macOS Stickies into a Notion database, preserving title, created/modified dates, "
+    "and full content as page body blocks.",
 )
-parser.add_argument("--limit", type=int, default=None)
-parser.add_argument("--dry-run", action="store_true")
+
+parser.add_argument(
+    "--tz",
+    default=default_tz,
+    help="IANA timezone (e.g. America/Los_Angeles). Defaults to TZ env var or America/New_York.",
+)
+parser.add_argument(
+    "--verbose",
+    action="store_true",
+    help="Enable verbose logging (prints Notion DB title, number of notes, upsert actions, etc.).",
+)
+parser.add_argument(
+    "--mode",
+    choices=["db"],
+    default="db",
+    help="Source mode: currently only 'db' is supported (reads StickiesDatabase plist).",
+)
+parser.add_argument(
+    "--db-path",
+    default="~/Library/Containers/com.apple.Stickies/Data/Library/StickiesDatabase",
+    help="Path to StickiesDatabase file (default: standard macOS location).",
+)
+parser.add_argument(
+    "--limit", type=int, default=None, help="Import at most N notes (useful for testing)."
+)
+parser.add_argument(
+    "--dry-run",
+    action="store_true",
+    help="Parse and show preview without writing anything to Notion.",
+)
 
 
 def main():
