@@ -51,8 +51,25 @@ if not database_id:
 
 parser = argparse.ArgumentParser(
     prog="stickies_to_notion.py",
-    description="Import macOS Stickies into a Notion database, preserving title, created/modified dates, "
-    "and full content as page body blocks.",
+    description=(
+        "Import macOS Stickies into a Notion database, preserving title, created/modified dates, "
+        "and full content as page body blocks."
+    ),
+    epilog="""Examples:
+  Dry-run (no writes, just preview 5 notes):
+    python stickies_to_notion.py --dry-run --verbose
+
+  Import full Stickies database (default location):
+    python stickies_to_notion.py --mode db --verbose
+
+  Import Stickies from a copied DB file:
+    python stickies_to_notion.py --db-path /tmp/StickiesDatabase --verbose
+
+Notes:
+  • Requires NOTION_TOKEN and NOTION_DB_ID set in your .env
+  • Quit Stickies.app before running, or copy the DB to /tmp if locked
+""",
+    formatter_class=argparse.RawDescriptionHelpFormatter,
 )
 
 parser.add_argument(
