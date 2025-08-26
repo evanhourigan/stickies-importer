@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from bs4 import BeautifulSoup
+from bs4.element import NavigableString, Tag
 
 try:
     from zoneinfo import ZoneInfo  # py39+
@@ -235,3 +236,111 @@ def read_stickies_db(db_path: Path, tz_str: str) -> list[StickyNote]:
         title = truncate_title(first_nonempty_line(plain))
         notes.append(StickyNote(title, created, modified, html, plain, f"db#{idx}"))
     return notes
+
+
+# --- HTML → Notion blocks ---
+def _text_obj(content: str, **ann):
+    return {
+        "type": "text",
+        "text": {"content": content, "link": None},
+        "annotations": {
+            "bold": bool(ann.get("bold")),
+            "italic": bool(ann.get("italic")),
+            "strikethrough": False,
+            "underline": bool(ann.get("underline")),
+            "code": bool(ann.get("code")),
+            "color": "default",
+        },
+        "plain_text": content,
+        "href": None,
+    }
+
+
+def _inline_from_node(node: Tag | NavigableString):
+    out = []
+
+    def push(txt):
+        for c in chunk_text(txt):
+            out.append(_text_obj(c))
+
+    if isinstance(node, NavigableString):
+        push(str(node))
+        return out
+    tag = node.name.lower()
+    ann = {
+        "bold": tag in ("strong", "b"),
+        "italic": tag in ("em", "i"),
+        "underline": tag == "u",
+        "code": tag == "code",
+    }
+    for child in node.children:
+        out.extend(_inline_from_node(child))
+    if any(ann.values()):
+        for i in out:
+            for k, v in ann.items():
+                if v:
+                    i["annotations"][k] = True
+    return out
+
+
+def html_to_blocks(html: str):
+    soup = BeautifulSoup(html, "html.parser")
+    body = soup.body or soup
+    blocks = []
+    for node in body.children:
+        if isinstance(node, NavigableString):
+            txt = normalize_ws(str(node))
+            if txt:
+                blocks.append(
+                    {
+                        "object": "block",
+                        "type": "paragraph",
+                        "paragraph": {"rich_text": [_text_obj(txt)]},
+                    }
+                )
+            continue
+        if not isinstance(node, Tag):
+            continue
+        tag = node.name.lower()
+        if tag in ("h1", "h2", "h3"):
+            level = {"h1": "heading_1", "h2": "heading_2", "h3": "heading_3"}[tag]
+            blocks.append(
+                {"object": "block", "type": level, level: {"rich_text": _inline_from_node(node)}}
+            )
+        elif tag in ("ul", "ol"):
+            ordered = tag == "ol"
+            for li in node.find_all("li", recursive=False):
+                t = "numbered_list_item" if ordered else "bulleted_list_item"
+                blocks.append(
+                    {"object": "block", "type": t, t: {"rich_text": _inline_from_node(li)}}
+                )
+        elif tag in ("pre",):
+            code_text = node.get_text("\n")
+            blocks.append(
+                {
+                    "object": "block",
+                    "type": "code",
+                    "code": {"language": "plain text", "rich_text": [_text_obj(code_text)]},
+                }
+            )
+        elif tag in ("blockquote",):
+            blocks.append(
+                {
+                    "object": "block",
+                    "type": "quote",
+                    "quote": {"rich_text": _inline_from_node(node)},
+                }
+            )
+        else:
+            blocks.append(
+                {
+                    "object": "block",
+                    "type": "paragraph",
+                    "paragraph": {"rich_text": _inline_from_node(node) or [_text_obj("")]},
+                }
+            )
+    if not blocks:
+        blocks.append(
+            {"object": "block", "type": "paragraph", "paragraph": {"rich_text": [_text_obj("")]}}
+        )
+    return blocks
