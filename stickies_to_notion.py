@@ -89,16 +89,6 @@ parser.add_argument(
     default="db",
     help="Source mode: supports 'db' (StickiesDatabase plist) and 'rtf_dir' (RTF files).",
 )
-parser.add_argument(
-    "--db-path",
-    default=default_db_path(),
-    help="Path to StickiesDatabase file (DB mode). Defaults to ~/Library/StickiesDatabase or the Containers path if present.",
-)
-parser.add_argument(
-    "--rtf-dir",
-    default="~/Library/Containers/com.apple.Stickies/Data/Library",
-    help="Folder containing Stickies .rtf/.rtfd files (RTF dir mode).",
-)
 
 
 def default_db_path() -> str:
@@ -117,8 +107,12 @@ def default_db_path() -> str:
 parser.add_argument(
     "--db-path",
     default=default_db_path(),
-    help="Path to StickiesDatabase file. Defaults to ~/Library/StickiesDatabase "
-    "or the Containers path if present.",
+    help="Path to StickiesDatabase file (DB mode). Defaults to ~/Library/StickiesDatabase or the Containers path if present.",
+)
+parser.add_argument(
+    "--rtf-dir",
+    default="~/Library/Containers/com.apple.Stickies/Data/Library/Stickies",
+    help="Folder containing Stickies .rtf/.rtfd files (RTF dir mode).",
 )
 parser.add_argument(
     "--show-db-path",
@@ -141,125 +135,17 @@ parser.add_argument(
 )
 
 
-def main():
-    args = parser.parse_args()
-    notion = Client(auth=token)
-
-    if args.verbose:
-        print(f"Using database ID: {database_id}")
-        print(f"Using TZ: {args.tz}")
-
-    db = notion.databases.retrieve(database_id=database_id)  # connectivity check
-    if args.verbose:
-        title = "".join([t.get("plain_text", "") for t in db.get("title", [])]) or "(untitled)"
-        print(f"Connected to Notion DB: {title} ({database_id})")
-        print(f"Using TZ: {args.tz}")
-
-    if args.show_db_path:
-        print(f"Stickies DB path: {os.path.expanduser(args.db_path)}")
-        return
-
-    # Read Stickies notes
-    if args.mode == "db":
-        db_path = Path(os.path.expanduser(args.db_path))
-        if not db_path.exists():
-            # If DB file doesn't exist, try container folder (auto-fallback to rtf_dir mode)
-            rtf_folder = Path(os.path.expanduser(args.rtf_dir))
-            rtf_candidates = list(rtf_folder.glob("*.rtf")) + list(rtf_folder.glob("*.rtfd"))
-            if rtf_candidates:
-                if args.verbose:
-                    print(
-                        f"No DB file at {db_path}, but found {len(rtf_candidates)} RTF files in {rtf_folder}. Falling back to rtf_dir mode."
-                    )
-                args.mode = "rtf_dir"
-            else:
-                # Friendly guidance if nothing is found at the chosen path
-                candidates = [
-                    Path(os.path.expanduser("~/Library/StickiesDatabase")),
-                    Path(
-                        os.path.expanduser(
-                            "~/Library/Containers/com.apple.Stickies/Data/Library/StickiesDatabase"
-                        )
-                    ),
-                ]
-                existing = [str(p) for p in candidates if p.exists()]
-                msg_lines = [
-                    f"ERROR: Stickies database not found at: {db_path}",
-                    "",
-                    "Troubleshooting tips:",
-                    "  • Make sure Stickies.app has at least one note saved.",
-                    "  • Quit Stickies.app before running this script (the DB can be locked).",
-                    "  • Try copying the DB if locked, then point --db-path at the copy:",
-                    "      cp ~/Library/StickiesDatabase /tmp/StickiesDatabase",
-                    "      python stickies_to_notion.py --db-path /tmp/StickiesDatabase --verbose",
-                    "",
-                    "Common locations checked:",
-                    f"  - {candidates[0]}",
-                    f"  - {candidates[1]}",
-                ]
-                if existing:
-                    msg_lines.append("")
-                    msg_lines.append("Found a database at:")
-                    for p in existing:
-                        msg_lines.append(f"  • {p}")
-                    msg_lines.append("Re-run with:  --db-path <one of the above>")
-                else:
-                    msg_lines.append("")
-                    msg_lines.append("No Stickies database was found in the common locations.")
-                    msg_lines.append("Open Stickies.app, create a sample note, then run:")
-                    msg_lines.append("  python stickies_to_notion.py --show-db-path")
-                raise SystemExit("\n".join(msg_lines))
-            try:
-                notes = read_stickies_db(db_path, args.tz)
-            except PermissionError as e:
-                raise SystemExit(
-                    f"ERROR: Could not open Stickies database at {db_path} — it may be locked.\n"
-                    f"Tip: Quit Stickies.app, or copy the database somewhere else (e.g. /tmp) and run with --db-path.\n\n{e}"
-                )
-
-    elif args.mode == "rtf_dir":
-        rtf_dir = Path(os.path.expanduser(args.rtf_dir))
-        if not rtf_dir.exists():
-            raise SystemExit(f"ERROR: RTF directory not found at: {rtf_dir}")
-        notes = read_rtf_dir(rtf_dir, args.tz)
-
-    else:
-        notes = []
-
-    if args.limit:
-        notes = notes[: args.limit]
-
-    if not notes:
-        print("No notes found.")
-        return
-
-    # Build stable hashes (content + created)
-    items = []
-    for n in notes:
-        h = sha256_hex(normalize_ws(n.plain) + "|" + n.created.isoformat())
-        items.append((n, h))
-
-    if args.dry_run:
-        print(f"[DRY RUN] Would import {len(items)} notes. Showing first 5:")
-        for n, h in items[:5]:
-            print(f"— {n.title} | created {n.created} | modified {n.modified} | hash {h[:10]}…")
-        return
-
-    existing = fetch_existing_hashes(notion, database_id)
-    if args.verbose:
-        print(f"Found {len(existing)} existing Import Hashes; upserting {len(items)} notes.")
-
-    for n, h in items:
-        page_id = existing.get(h)
-        create_or_update_page(notion, database_id, n, page_id, h, verbose=args.verbose)
+# --- Essential classes and functions needed by main() ---
 
 
-if __name__ == "__main__":
-    main()
-
-# --- Utility helpers ---
-MAX_TITLE_LEN = 200
-MAX_TEXT_CHUNK = 1800
+@dataclass
+class StickyNote:
+    title: str
+    created: dt.datetime
+    modified: dt.datetime
+    html: Optional[str]
+    plain: str
+    source_id: str
 
 
 def normalize_ws(s: str) -> str:
@@ -276,27 +162,12 @@ def first_nonempty_line(text: str) -> str:
     return "(untitled)"
 
 
+MAX_TITLE_LEN = 200
+
+
 def truncate_title(s: str) -> str:
     s = s.strip()
     return (s[: MAX_TITLE_LEN - 1] + "…") if len(s) > MAX_TITLE_LEN else s
-
-
-def chunk_text(s: str, n: int = MAX_TEXT_CHUNK):
-    chunks, buf, count = [], [], 0
-    for part in re.split(r"(\s+)", s):
-        if count + len(part) > n:
-            chunks.append("".join(buf))
-            buf, count = [part], len(part)
-        else:
-            buf.append(part)
-            count += len(part)
-    if buf:
-        chunks.append("".join(buf))
-    return [c for c in chunks if c]
-
-
-def sha256_hex(s: str) -> str:
-    return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
 
 def rtf_to_html_and_text(rtf_bytes: bytes) -> Tuple[Optional[str], str]:
@@ -332,17 +203,6 @@ def rtf_to_html_and_text(rtf_bytes: bytes) -> Tuple[Optional[str], str]:
         text = _re.sub(r"[{}]", "", text)
     text = "\n".join([ln.rstrip() for ln in text.splitlines()])
     return None, text
-
-
-# --- Stickies models & reader ---
-@dataclass
-class StickyNote:
-    title: str
-    created: dt.datetime
-    modified: dt.datetime
-    html: Optional[str]
-    plain: str
-    source_id: str
 
 
 def _extract_note_candidates(obj) -> list[dict]:
@@ -431,6 +291,172 @@ def read_rtf_dir(folder: Path, tz_str: str) -> list[StickyNote]:
         title = truncate_title(first_nonempty_line(plain) or p.stem)
         notes.append(StickyNote(title, created, modified, html, plain, str(p)))
     return notes
+
+
+def sha256_hex(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+
+MAX_TEXT_CHUNK = 1800
+
+
+def chunk_text(s: str, n: int = MAX_TEXT_CHUNK):
+    chunks, buf, count = [], [], 0
+    for part in re.split(r"(\s+)", s):
+        if count + len(part) > n:
+            chunks.append("".join(buf))
+            buf, count = [part], len(part)
+        else:
+            buf.append(part)
+            count += len(part)
+    if buf:
+        chunks.append("".join(buf))
+    return [c for c in chunks if c]
+
+
+def main():
+    args = parser.parse_args()
+    notion = Client(auth=token)
+
+    if args.verbose:
+        print(f"Using database ID: {database_id}")
+        print(f"Using TZ: {args.tz}")
+
+    db = notion.databases.retrieve(database_id=database_id)  # connectivity check
+    if args.verbose:
+        title = "".join([t.get("plain_text", "") for t in db.get("title", [])]) or "(untitled)"
+        print(f"Connected to Notion DB: {title} ({database_id})")
+        print(f"Using TZ: {args.tz}")
+
+    if args.show_db_path:
+        db_path = Path(os.path.expanduser(args.db_path))
+        rtf_dir = Path(os.path.expanduser(args.rtf_dir))
+
+        print(f"Stickies DB path: {db_path}")
+        print(f"DB file exists: {db_path.exists()}")
+
+        if not db_path.exists():
+            print(f"\nRTF directory: {rtf_dir}")
+            print(f"RTF dir exists: {rtf_dir.exists()}")
+            if rtf_dir.exists():
+                rtf_files = list(rtf_dir.glob("*.rtf")) + list(rtf_dir.glob("*.rtfd"))
+                print(f"RTF files found: {len(rtf_files)}")
+                if rtf_files:
+                    print("→ Will use RTF mode automatically")
+                    print("Sample files:")
+                    for f in sorted(rtf_files)[:5]:
+                        print(f"  - {f.name}")
+                    if len(rtf_files) > 5:
+                        print(f"  ... and {len(rtf_files) - 5} more")
+                else:
+                    print("→ No RTF files found")
+            else:
+                print("→ RTF directory doesn't exist")
+        else:
+            print("→ Will use DB mode")
+        return
+
+    # Read Stickies notes
+    if args.mode == "db":
+        db_path = Path(os.path.expanduser(args.db_path))
+        if not db_path.exists():
+            # If DB file doesn't exist, try container folder (auto-fallback to rtf_dir mode)
+            rtf_folder = Path(os.path.expanduser(args.rtf_dir))
+            rtf_candidates = list(rtf_folder.glob("*.rtf")) + list(rtf_folder.glob("*.rtfd"))
+            if rtf_candidates:
+                if args.verbose:
+                    print(
+                        f"No DB file at {db_path}, but found {len(rtf_candidates)} RTF files in {rtf_folder}. Falling back to rtf_dir mode."
+                    )
+                notes = read_rtf_dir(rtf_folder, args.tz)
+            else:
+                # Friendly guidance if nothing is found at the chosen path
+                candidates = [
+                    Path(os.path.expanduser("~/Library/StickiesDatabase")),
+                    Path(
+                        os.path.expanduser(
+                            "~/Library/Containers/com.apple.Stickies/Data/Library/StickiesDatabase"
+                        )
+                    ),
+                ]
+                existing = [str(p) for p in candidates if p.exists()]
+                msg_lines = [
+                    f"ERROR: Stickies database not found at: {db_path}",
+                    "",
+                    "Troubleshooting tips:",
+                    "  • Make sure Stickies.app has at least one note saved.",
+                    "  • Quit Stickies.app before running this script (the DB can be locked).",
+                    "  • Try copying the DB if locked, then point --db-path at the copy:",
+                    "      cp ~/Library/StickiesDatabase /tmp/StickiesDatabase",
+                    "      python stickies_to_notion.py --db-path /tmp/StickiesDatabase --verbose",
+                    "",
+                    "Common locations checked:",
+                    f"  - {candidates[0]}",
+                    f"  - {candidates[1]}",
+                ]
+                if existing:
+                    msg_lines.append("")
+                    msg_lines.append("Found a database at:")
+                    for p in existing:
+                        msg_lines.append(f"  • {p}")
+                    msg_lines.append("Re-run with:  --db-path <one of the above>")
+                else:
+                    msg_lines.append("")
+                    msg_lines.append("No Stickies database was found in the common locations.")
+                    msg_lines.append("Open Stickies.app, create a sample note, then run:")
+                    msg_lines.append("  python stickies_to_notion.py --show-db-path")
+                raise SystemExit("\n".join(msg_lines))
+        else:
+            # DB file exists, try to read it
+            try:
+                notes = read_stickies_db(db_path, args.tz)
+            except PermissionError as e:
+                raise SystemExit(
+                    f"ERROR: Could not open Stickies database at {db_path} — it may be locked.\n"
+                    f"Tip: Quit Stickies.app, or copy the database somewhere else (e.g. /tmp) and run with --db-path.\n\n{e}"
+                )
+
+    elif args.mode == "rtf_dir":
+        rtf_dir = Path(os.path.expanduser(args.rtf_dir))
+        if not rtf_dir.exists():
+            raise SystemExit(f"ERROR: RTF directory not found at: {rtf_dir}")
+        notes = read_rtf_dir(rtf_dir, args.tz)
+
+    else:
+        notes = []
+
+    if args.limit:
+        notes = notes[: args.limit]
+
+    if not notes:
+        print("No notes found.")
+        return
+
+    # Build stable hashes (content + created)
+    items = []
+    for n in notes:
+        h = sha256_hex(normalize_ws(n.plain) + "|" + n.created.isoformat())
+        items.append((n, h))
+
+    if args.dry_run:
+        print(f"[DRY RUN] Would import {len(items)} notes. Showing first 5:")
+        for n, h in items[:5]:
+            print(f"— {n.title} | created {n.created} | modified {n.modified} | hash {h[:10]}…")
+        return
+
+    existing = fetch_existing_hashes(notion, database_id)
+    if args.verbose:
+        print(f"Found {len(existing)} existing Import Hashes; upserting {len(items)} notes.")
+
+    for n, h in items:
+        page_id = existing.get(h)
+        create_or_update_page(notion, database_id, n, page_id, h, verbose=args.verbose)
+
+
+if __name__ == "__main__":
+    main()
+
+# --- Additional utility functions needed by main() ---
 
 
 # --- HTML → Notion blocks ---
