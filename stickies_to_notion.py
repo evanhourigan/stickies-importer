@@ -49,6 +49,7 @@ if not token:
 if not database_id:
     raise SystemExit("ERROR: NOTION_DB_ID is not set (see .env.example).")
 
+VERSION = "0.1.0"
 parser = argparse.ArgumentParser(
     prog="stickies_to_notion.py",
     description=(
@@ -100,6 +101,12 @@ parser.add_argument(
     "--dry-run",
     action="store_true",
     help="Parse and show preview without writing anything to Notion.",
+)
+parser.add_argument(
+    "--version",
+    action="version",
+    version=f"%(prog)s {VERSION}",
+    help="Show script version and exit.",
 )
 
 
