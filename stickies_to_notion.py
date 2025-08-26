@@ -280,10 +280,21 @@ def read_rtf_dir(folder: Path, tz_str: str) -> list[StickyNote]:
         return notes
     for p in sorted(list(folder.glob("*.rtf")) + list(folder.glob("*.rtfd"))):
         try:
-            raw = p.read_bytes() if p.suffix.lower() == ".rtf" else None
+            if p.suffix.lower() == ".rtf":
+                # Single RTF file
+                raw = p.read_bytes()
+            elif p.suffix.lower() == ".rtfd":
+                # RTF bundle - read TXT.rtf inside
+                rtf_file = p / "TXT.rtf"
+                if rtf_file.exists():
+                    raw = rtf_file.read_bytes()
+                else:
+                    continue
+            else:
+                continue
         except Exception:
             continue
-        html, plain = rtf_to_html_and_text(raw or b"")
+        html, plain = rtf_to_html_and_text(raw)
         # Use file timestamps since per-file metadata varies
         st = p.stat()
         created = dt.datetime.fromtimestamp(getattr(st, "st_birthtime", st.st_mtime), tz=tz)
