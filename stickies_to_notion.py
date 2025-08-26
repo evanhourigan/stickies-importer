@@ -49,9 +49,15 @@ if not token:
 if not database_id:
     raise SystemExit("ERROR: NOTION_DB_ID is not set (see .env.example).")
 
-parser = argparse.ArgumentParser()
+parser = argparse.ArgumentParser(description="Stickies → Notion importer")
 parser.add_argument("--tz", default=default_tz, help="IANA timezone (e.g. America/Los_Angeles).")
-parser.add_argument("--verbose", action="store_true", help="Verbose output.")
+parser.add_argument("--verbose", action="store_true")
+parser.add_argument("--mode", choices=["db"], default="db")
+parser.add_argument(
+    "--db-path", default="~/Library/Containers/com.apple.Stickies/Data/Library/StickiesDatabase"
+)
+parser.add_argument("--limit", type=int, default=None)
+parser.add_argument("--dry-run", action="store_true")
 
 
 def main():
@@ -62,22 +68,47 @@ def main():
         print(f"Using database ID: {database_id}")
         print(f"Using TZ: {args.tz}")
 
-    try:
-        # Simple connectivity check: retrieve database metadata
-        db = notion.databases.retrieve(database_id=database_id)
-        if args.verbose:
-            title = "".join([t.get("plain_text", "") for t in db.get("title", [])]) or "(untitled)"
-            print(f"Connected to Notion DB: {title}")
-        print("OK: Notion connection verified.")
-    except Exception as e:
-        print(f"ERROR: Failed to connect to Notion database")
-        print(f"Database ID: {database_id}")
-        print(f"Error: {e}")
-        print("\nTroubleshooting:")
-        print("1. Verify the NOTION_DB_ID is correct")
-        print("2. Ensure your Notion integration has access to this database")
-        print("3. Check that the database is shared with your integration")
-        raise SystemExit(1)
+    db = notion.databases.retrieve(database_id=database_id)  # connectivity check
+    if args.verbose:
+        title = "".join([t.get("plain_text", "") for t in db.get("title", [])]) or "(untitled)"
+        print(f"Connected to Notion DB: {title} ({database_id})")
+        print(f"Using TZ: {args.tz}")
+
+    # Read Stickies notes (db mode)
+    if args.mode == "db":
+        db_path = Path(os.path.expanduser(args.db_path))
+        if not db_path.exists():
+            raise SystemExit(f"ERROR: Stickies database not found at {db_path}")
+        notes = read_stickies_db(db_path, args.tz)
+    else:
+        notes = []
+
+    if args.limit:
+        notes = notes[: args.limit]
+
+    if not notes:
+        print("No notes found.")
+        return
+
+    # Build stable hashes (content + created)
+    items = []
+    for n in notes:
+        h = sha256_hex(normalize_ws(n.plain) + "|" + n.created.isoformat())
+        items.append((n, h))
+
+    if args.dry_run:
+        print(f"[DRY RUN] Would import {len(items)} notes. Showing first 5:")
+        for n, h in items[:5]:
+            print(f"— {n.title} | created {n.created} | modified {n.modified} | hash {h[:10]}…")
+        return
+
+    existing = fetch_existing_hashes(notion, database_id)
+    if args.verbose:
+        print(f"Found {len(existing)} existing Import Hashes; upserting {len(items)} notes.")
+
+    for n, h in items:
+        page_id = existing.get(h)
+        create_or_update_page(notion, database_id, n, page_id, h, verbose=args.verbose)
 
 
 if __name__ == "__main__":
