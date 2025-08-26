@@ -85,9 +85,19 @@ parser.add_argument(
 )
 parser.add_argument(
     "--mode",
-    choices=["db"],
+    choices=["db", "rtf_dir"],
     default="db",
-    help="Source mode: currently only 'db' is supported (reads StickiesDatabase plist).",
+    help="Source mode: supports 'db' (StickiesDatabase plist) and 'rtf_dir' (RTF files).",
+)
+parser.add_argument(
+    "--db-path",
+    default=default_db_path(),
+    help="Path to StickiesDatabase file (DB mode). Defaults to ~/Library/StickiesDatabase or the Containers path if present.",
+)
+parser.add_argument(
+    "--rtf-dir",
+    default="~/Library/Containers/com.apple.Stickies/Data/Library",
+    help="Folder containing Stickies .rtf/.rtfd files (RTF dir mode).",
 )
 
 
@@ -149,53 +159,69 @@ def main():
         print(f"Stickies DB path: {os.path.expanduser(args.db_path)}")
         return
 
-    # Read Stickies notes (db mode)
+    # Read Stickies notes
     if args.mode == "db":
         db_path = Path(os.path.expanduser(args.db_path))
         if not db_path.exists():
-            # Friendly guidance if nothing is found at the chosen path
-            candidates = [
-                Path(os.path.expanduser("~/Library/StickiesDatabase")),
-                Path(
-                    os.path.expanduser(
-                        "~/Library/Containers/com.apple.Stickies/Data/Library/StickiesDatabase"
+            # If DB file doesn't exist, try container folder (auto-fallback to rtf_dir mode)
+            rtf_folder = Path(os.path.expanduser(args.rtf_dir))
+            rtf_candidates = list(rtf_folder.glob("*.rtf")) + list(rtf_folder.glob("*.rtfd"))
+            if rtf_candidates:
+                if args.verbose:
+                    print(
+                        f"No DB file at {db_path}, but found {len(rtf_candidates)} RTF files in {rtf_folder}. Falling back to rtf_dir mode."
                     )
-                ),
-            ]
-            existing = [str(p) for p in candidates if p.exists()]
-            msg_lines = [
-                f"ERROR: Stickies database not found at: {db_path}",
-                "",
-                "Troubleshooting tips:",
-                "  • Make sure Stickies.app has at least one note saved.",
-                "  • Quit Stickies.app before running this script (the DB can be locked).",
-                "  • Try copying the DB if locked, then point --db-path at the copy:",
-                "      cp ~/Library/StickiesDatabase /tmp/StickiesDatabase",
-                "      python stickies_to_notion.py --db-path /tmp/StickiesDatabase --verbose",
-                "",
-                "Common locations checked:",
-                f"  - {candidates[0]}",
-                f"  - {candidates[1]}",
-            ]
-            if existing:
-                msg_lines.append("")
-                msg_lines.append("Found a database at:")
-                for p in existing:
-                    msg_lines.append(f"  • {p}")
-                msg_lines.append("Re-run with:  --db-path <one of the above>")
+                args.mode = "rtf_dir"
             else:
-                msg_lines.append("")
-                msg_lines.append("No Stickies database was found in the common locations.")
-                msg_lines.append("Open Stickies.app, create a sample note, then run:")
-                msg_lines.append("  python stickies_to_notion.py --show-db-path")
-            raise SystemExit("\n".join(msg_lines))
-        try:
-            notes = read_stickies_db(db_path, args.tz)
-        except PermissionError as e:
-            raise SystemExit(
-                f"ERROR: Could not open Stickies database at {db_path} — it may be locked.\n"
-                f"Tip: Quit Stickies.app, or copy the database somewhere else (e.g. /tmp) and run with --db-path.\n\n{e}"
-            )
+                # Friendly guidance if nothing is found at the chosen path
+                candidates = [
+                    Path(os.path.expanduser("~/Library/StickiesDatabase")),
+                    Path(
+                        os.path.expanduser(
+                            "~/Library/Containers/com.apple.Stickies/Data/Library/StickiesDatabase"
+                        )
+                    ),
+                ]
+                existing = [str(p) for p in candidates if p.exists()]
+                msg_lines = [
+                    f"ERROR: Stickies database not found at: {db_path}",
+                    "",
+                    "Troubleshooting tips:",
+                    "  • Make sure Stickies.app has at least one note saved.",
+                    "  • Quit Stickies.app before running this script (the DB can be locked).",
+                    "  • Try copying the DB if locked, then point --db-path at the copy:",
+                    "      cp ~/Library/StickiesDatabase /tmp/StickiesDatabase",
+                    "      python stickies_to_notion.py --db-path /tmp/StickiesDatabase --verbose",
+                    "",
+                    "Common locations checked:",
+                    f"  - {candidates[0]}",
+                    f"  - {candidates[1]}",
+                ]
+                if existing:
+                    msg_lines.append("")
+                    msg_lines.append("Found a database at:")
+                    for p in existing:
+                        msg_lines.append(f"  • {p}")
+                    msg_lines.append("Re-run with:  --db-path <one of the above>")
+                else:
+                    msg_lines.append("")
+                    msg_lines.append("No Stickies database was found in the common locations.")
+                    msg_lines.append("Open Stickies.app, create a sample note, then run:")
+                    msg_lines.append("  python stickies_to_notion.py --show-db-path")
+                raise SystemExit("\n".join(msg_lines))
+            try:
+                notes = read_stickies_db(db_path, args.tz)
+            except PermissionError as e:
+                raise SystemExit(
+                    f"ERROR: Could not open Stickies database at {db_path} — it may be locked.\n"
+                    f"Tip: Quit Stickies.app, or copy the database somewhere else (e.g. /tmp) and run with --db-path.\n\n{e}"
+                )
+
+    elif args.mode == "rtf_dir":
+        rtf_dir = Path(os.path.expanduser(args.rtf_dir))
+        if not rtf_dir.exists():
+            raise SystemExit(f"ERROR: RTF directory not found at: {rtf_dir}")
+        notes = read_rtf_dir(rtf_dir, args.tz)
 
     else:
         notes = []
@@ -384,6 +410,26 @@ def read_stickies_db(db_path: Path, tz_str: str) -> list[StickyNote]:
         modified = _get_dt(cand, r"modif|update", tz) or created
         title = truncate_title(first_nonempty_line(plain))
         notes.append(StickyNote(title, created, modified, html, plain, f"db#{idx}"))
+    return notes
+
+
+def read_rtf_dir(folder: Path, tz_str: str) -> list[StickyNote]:
+    tz = ZoneInfo(tz_str) if ZoneInfo else None
+    notes: list[StickyNote] = []
+    if not folder.exists():
+        return notes
+    for p in sorted(list(folder.glob("*.rtf")) + list(folder.glob("*.rtfd"))):
+        try:
+            raw = p.read_bytes() if p.suffix.lower() == ".rtf" else None
+        except Exception:
+            continue
+        html, plain = rtf_to_html_and_text(raw or b"")
+        # Use file timestamps since per-file metadata varies
+        st = p.stat()
+        created = dt.datetime.fromtimestamp(getattr(st, "st_birthtime", st.st_mtime), tz=tz)
+        modified = dt.datetime.fromtimestamp(st.st_mtime, tz=tz)
+        title = truncate_title(first_nonempty_line(plain) or p.stem)
+        notes.append(StickyNote(title, created, modified, html, plain, str(p)))
     return notes
 
 
