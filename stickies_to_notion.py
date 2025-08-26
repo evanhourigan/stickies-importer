@@ -111,6 +111,11 @@ parser.add_argument(
     "or the Containers path if present.",
 )
 parser.add_argument(
+    "--show-db-path",
+    action="store_true",
+    help="Print the Stickies database path the script will use and exit.",
+)
+parser.add_argument(
     "--limit", type=int, default=None, help="Import at most N notes (useful for testing)."
 )
 parser.add_argument(
@@ -139,6 +144,10 @@ def main():
         title = "".join([t.get("plain_text", "") for t in db.get("title", [])]) or "(untitled)"
         print(f"Connected to Notion DB: {title} ({database_id})")
         print(f"Using TZ: {args.tz}")
+
+    if args.show_db_path:
+        print(f"Stickies DB path: {os.path.expanduser(args.db_path)}")
+        return
 
     # Read Stickies notes (db mode)
     if args.mode == "db":
