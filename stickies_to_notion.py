@@ -153,7 +153,42 @@ def main():
     if args.mode == "db":
         db_path = Path(os.path.expanduser(args.db_path))
         if not db_path.exists():
-            raise SystemExit(f"ERROR: Stickies database not found at {db_path}")
+            # Friendly guidance if nothing is found at the chosen path
+            candidates = [
+                Path(os.path.expanduser("~/Library/StickiesDatabase")),
+                Path(
+                    os.path.expanduser(
+                        "~/Library/Containers/com.apple.Stickies/Data/Library/StickiesDatabase"
+                    )
+                ),
+            ]
+            existing = [str(p) for p in candidates if p.exists()]
+            msg_lines = [
+                f"ERROR: Stickies database not found at: {db_path}",
+                "",
+                "Troubleshooting tips:",
+                "  • Make sure Stickies.app has at least one note saved.",
+                "  • Quit Stickies.app before running this script (the DB can be locked).",
+                "  • Try copying the DB if locked, then point --db-path at the copy:",
+                "      cp ~/Library/StickiesDatabase /tmp/StickiesDatabase",
+                "      python stickies_to_notion.py --db-path /tmp/StickiesDatabase --verbose",
+                "",
+                "Common locations checked:",
+                f"  - {candidates[0]}",
+                f"  - {candidates[1]}",
+            ]
+            if existing:
+                msg_lines.append("")
+                msg_lines.append("Found a database at:")
+                for p in existing:
+                    msg_lines.append(f"  • {p}")
+                msg_lines.append("Re-run with:  --db-path <one of the above>")
+            else:
+                msg_lines.append("")
+                msg_lines.append("No Stickies database was found in the common locations.")
+                msg_lines.append("Open Stickies.app, create a sample note, then run:")
+                msg_lines.append("  python stickies_to_notion.py --show-db-path")
+            raise SystemExit("\n".join(msg_lines))
         try:
             notes = read_stickies_db(db_path, args.tz)
         except PermissionError as e:
